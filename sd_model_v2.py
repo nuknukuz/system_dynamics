@@ -639,26 +639,84 @@ def f(t, y, params):
     ])
 
 
+def _integrate_rk4(func, t0, t1, y0, params, dt=0.25, t_eval=None):
+    """Классический явный метод Рунге–Кутты 4-го порядка с фиксированным шагом dt.
+
+    Соответствует методу интегрирования, заявленному в тексте ВКР (RK4, Δt = 0.25).
+    Интегрирование ведётся по внутренней равномерной сетке с шагом dt, а значения
+    в точках t_eval получаются линейной интерполяцией (стоки между узлами шага
+    меняются практически линейно при таком мелком шаге).
+    Возвращает объект с полями .t, .y, .success, .message — совместимо с solve_ivp.
+    """
+    n_steps = int(math.ceil((t1 - t0) / dt))
+    ts = t0 + dt * np.arange(n_steps + 1)
+    ts[-1] = t1  # гарантируем точное попадание в правый конец интервала
+    ys = np.zeros((len(y0), n_steps + 1), dtype=float)
+    ys[:, 0] = y0
+    y = np.array(y0, dtype=float)
+
+    for i in range(n_steps):
+        t = ts[i]
+        h = ts[i + 1] - ts[i]
+        k1 = np.asarray(func(t, y, params), dtype=float)
+        k2 = np.asarray(func(t + 0.5 * h, y + 0.5 * h * k1, params), dtype=float)
+        k3 = np.asarray(func(t + 0.5 * h, y + 0.5 * h * k2, params), dtype=float)
+        k4 = np.asarray(func(t + h, y + h * k3, params), dtype=float)
+        y = y + (h / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+        ys[:, i + 1] = y
+
+    if not np.all(np.isfinite(ys)):
+        return _SolLike(ts, ys, success=False,
+                        message="RK4: обнаружены NaN/Inf при интегрировании")
+
+    if t_eval is not None:
+        y_eval = np.vstack([
+            np.interp(t_eval, ts, ys[k, :]) for k in range(ys.shape[0])
+        ])
+        return _SolLike(np.asarray(t_eval, dtype=float), y_eval, success=True, message="RK4 OK")
+
+    return _SolLike(ts, ys, success=True, message="RK4 OK")
+
+
+class _SolLike:
+    """Минимальная обёртка результата интегрирования, совместимая с solve_ivp."""
+    def __init__(self, t, y, success, message):
+        self.t = t
+        self.y = y
+        self.success = success
+        self.message = message
+
+
 def simulate(params=None, years=30, n_output=121, method="LSODA",
-             rtol=1e-6, atol=1e-9, y0_override=None):
+             rtol=1e-6, atol=1e-9, y0_override=None, dt=0.25):
+    """Прогон модели.
+
+    method:
+        "RK4"  — явный Рунге–Кутта 4-го порядка с фиксированным шагом dt (по умолч. 0.25),
+                  как заявлено в тексте ВКР;
+        иные   — передаются в scipy.integrate.solve_ivp ("LSODA", "RK45", ...).
+    """
     if params is None:
         params = P
 
     y0 = initial_state() if y0_override is None else np.array(y0_override, dtype=float)
     t_eval = np.linspace(0, years, n_output)
 
-    sol = solve_ivp(
-        f, [0, years], y0,
-        method=method,
-        t_eval=t_eval,
-        args=(params,),
-        rtol=rtol,
-        atol=atol,
-        max_step=0.5,
-    )
+    if str(method).upper() == "RK4":
+        sol = _integrate_rk4(f, 0.0, float(years), y0, params, dt=dt, t_eval=t_eval)
+    else:
+        sol = solve_ivp(
+            f, [0, years], y0,
+            method=method,
+            t_eval=t_eval,
+            args=(params,),
+            rtol=rtol,
+            atol=atol,
+            max_step=0.5,
+        )
 
     if not sol.success:
-        raise RuntimeError(f"solve_ivp failed: {sol.message}")
+        raise RuntimeError(f"integration failed ({method}): {sol.message}")
 
     stocks = {name: sol.y[i] for i, name in enumerate(STOCKS)}
 
